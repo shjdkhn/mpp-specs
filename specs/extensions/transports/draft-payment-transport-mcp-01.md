@@ -1,8 +1,8 @@
 ---
 title: "Payment Authentication Scheme: JSON-RPC & MCP Transport"
 abbrev: Payment JSON-RPC & MCP Transport
-docname: draft-payment-transport-mcp-00
-version: 00
+docname: draft-payment-transport-mcp-01
+version: "01"
 category: info
 ipr: noModificationTrust200902
 submissiontype: IETF
@@ -419,8 +419,9 @@ This specification defines two placement strategies for the
 ~~~
 
 **Nested `_meta`** (MCP): The `_meta` field is placed inside
-  `params` (for requests) or `result` (for responses), per MCP
-  conventions where `params` is always an object:
+  `params` (for requests and notifications) or `result` (for
+  responses), per MCP conventions where `params` is always an
+  object:
 
 ~~~json
 {
@@ -525,7 +526,7 @@ Servers MUST return `org.paymentauth/receipt` on every successful
 response to a paid request. Servers MUST NOT return receipts for
 unpaid requests.
 
-## Receipt Structure
+## Receipt Structure {#receipt-structure}
 
 The `org.paymentauth/receipt` object MUST contain:
 
@@ -751,7 +752,85 @@ debugging purposes.
 
 Servers MAY send JSON-RPC notifications to deliver data after
 a client has fulfilled a prior payment challenge (e.g.,
-streaming subscription updates over WebSocket).
+streaming subscription updates over WebSocket). Such
+notifications are subject to {{paid-delivery-correlation}}.
+
+## Correlating Paid Delivery {#paid-delivery-correlation}
+
+A connection can carry data for several paid requests at once.
+JSON-RPC notifications have no `id`, so this specification
+assigns responsibility for associating a notification with the
+paid request that authorized it.
+
+Correlation is the responsibility of the application protocol.
+A notification that a server sends as a result of a paid request
+MUST carry an identifier, defined by the application protocol,
+that associates it with that request. Examples include a
+subscription identifier returned in the paid result and the
+`progressToken` of an MCP `notifications/progress` message.
+
+Servers SHOULD also include a receipt in such notifications
+using `_meta` with key `org.paymentauth/receipt`. The receipt
+follows {{receipt-structure}}, and its `challengeId` MUST be the
+`id` of the challenge fulfilled by the originating paid request.
+The `_meta` field placement follows {{metadata-placement}}:
+root-level for generic JSON-RPC, nested in `params` for MCP.
+
+A receipt in a notification identifies the payment that
+authorized the delivery. It does not indicate a new payment.
+Clients and audit systems MUST NOT count receipts that share a
+`challengeId` as separate payments.
+
+A notification delivering data for a paid subscription over
+generic JSON-RPC:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "eth_subscription",
+  "params": {
+    "subscription": "0x9cef478923ff08bf67fde6c64013158d",
+    "result": {
+      "number": "0x1348ca",
+      "hash": "0x5f2e8a1c9b3d7e4f6a0b2c8d1e9f3a7b"
+    }
+  },
+  "_meta": {
+    "org.paymentauth/receipt": {
+      "status": "success",
+      "method": "tempo",
+      "timestamp": "2025-01-15T12:00:15Z",
+      "reference": "0xtx789...",
+      "challengeId": "ch_ws_789"
+    }
+  }
+}
+~~~
+
+A progress notification for a paid MCP tool call that the client
+sent with `progressToken` set to `"analysis-42"`:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/progress",
+  "params": {
+    "progressToken": "analysis-42",
+    "progress": 50,
+    "total": 100,
+    "message": "Analyzed 5 of 10 sources",
+    "_meta": {
+      "org.paymentauth/receipt": {
+        "status": "success",
+        "method": "tempo",
+        "timestamp": "2025-01-15T12:00:30Z",
+        "reference": "0xtx456...",
+        "challengeId": "tool-pay-123"
+      }
+    }
+  }
+}
+~~~
 
 ## Client Guidance
 
@@ -815,8 +894,9 @@ dumps, distributed tracing, and analytics telemetry.
 On-path attackers or malicious intermediaries could strip
 `org.paymentauth/credential` from requests (causing repeated
 payment challenges) or `org.paymentauth/receipt` from responses
-(affecting auditability). For network transports, TLS provides
-integrity. For stdio transport, rely on process isolation.
+and notifications (affecting auditability). For network
+transports, TLS provides integrity. For stdio transport, rely on
+process isolation.
 
 ## Confused Deputy
 
