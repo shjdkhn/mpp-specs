@@ -1,8 +1,8 @@
 ---
 title: "Payment Authentication Scheme: JSON-RPC & MCP Transport"
 abbrev: Payment JSON-RPC & MCP Transport
-docname: draft-payment-transport-mcp-00
-version: 00
+docname: draft-payment-transport-mcp-01
+version: "01"
 category: info
 ipr: noModificationTrust200902
 submissiontype: IETF
@@ -41,6 +41,9 @@ normative:
     target: https://www.jsonrpc.org/specification
 
 informative:
+  MCP-2026-07-28:
+    title: "Model Context Protocol Specification, 2026-07-28"
+    target: https://modelcontextprotocol.io/specification/2026-07-28
 ---
 
 --- abstract
@@ -48,9 +51,10 @@ informative:
 This document defines how the Payment HTTP Authentication Scheme
 operates over JSON-RPC 2.0 transports. It specifies the mapping
 of payment challenges to JSON-RPC error responses using
-implementation-defined error codes, credential transmission via
-metadata fields, receipt delivery in successful responses, and
-error handling conventions. This specification applies to any
+implementation-defined error codes, MCP-specific error codes and
+tool result signaling, credential transmission via metadata
+fields, receipt delivery in successful responses, and error
+handling conventions. This specification applies to any
 transport carrying JSON-RPC 2.0 messages, including WebSocket,
 HTTP, stdio, and protocol frameworks such as the Model Context
 Protocol (MCP).
@@ -161,6 +165,10 @@ Client                                                 Server
    │<─────────────────────────────────────────────────────┤
 ~~~
 
+MCP uses different error codes in step (2), and MCP tool calls
+can signal payment in a tool result instead of an error. See
+{{mcp-error-codes}} and {{mcp-tool-result-signaling}}.
+
 # Capability Advertisement
 
 Servers and clients SHOULD advertise supported payment methods
@@ -256,9 +264,12 @@ options to offer in challenges.
 ## Signaling Payment Required
 
 When a JSON-RPC method requires payment, the server MUST respond
-with a JSON-RPC error using code `-32042` (Payment Required).
-This code is within the JSON-RPC implementation-defined server
-error range (-32000 to -32099) per {{JSON-RPC}}:
+with a JSON-RPC error using the Payment Required code. On generic
+JSON-RPC transports this code is `-32042`, within the JSON-RPC
+implementation-defined server error range (-32000 to -32099) per
+{{JSON-RPC}}. On MCP, servers MUST use the code defined in
+{{mcp-error-codes}} instead, and MAY signal payment for tool
+calls as described in {{mcp-tool-result-signaling}}.
 
 ~~~json
 {
@@ -480,8 +491,8 @@ naming to avoid collisions with other extensions:
 The `org.paymentauth/credential` object MUST contain:
 
 **`challenge`** (REQUIRED): The complete challenge object from the
-  server's `-32042` error response. Clients MUST echo the challenge
-  unchanged.
+  server's Payment Required response. Clients MUST echo the
+  challenge unchanged.
 
 **`payload`** (REQUIRED): Method-specific payment proof as a JSON
   object. The schema is defined by the payment method specification.
@@ -571,7 +582,7 @@ Tool invocations via `tools/call` MAY require payment:
   "jsonrpc": "2.0",
   "id": 1,
   "error": {
-    "code": -32042,
+    "code": -31042,
     "message": "Payment Required",
     "data": {
       "httpStatus": 402,
@@ -587,6 +598,55 @@ Tool invocations via `tools/call` MAY require payment:
 }
 ~~~
 
+### Tool Result Signaling {#mcp-tool-result-signaling}
+
+MCP reports errors that originate in a tool inside the tool
+result rather than as a JSON-RPC error. For `tools/call`, a server
+MAY therefore signal payment in a `CallToolResult` instead of the
+error response shown above. In that case the server:
+
+- MUST set `isError` to `true`.
+- MUST include the key `org.paymentauth/payment-required` in the
+  result's `_meta`. Its value MUST have the same structure as
+  the `error.data` object of the equivalent error response,
+  including `failure` when payment verification failed
+  ({{payment-verification-failure}}).
+- SHOULD include a `content` item that states, in human-readable
+  text, that payment is required.
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [{
+      "type": "text",
+      "text": "Payment required to call premium-analysis."
+    }],
+    "isError": true,
+    "_meta": {
+      "org.paymentauth/payment-required": {
+        "httpStatus": 402,
+        "challenges": [{
+          "id": "tool-pay-123",
+          "realm": "tools.example.com",
+          "method": "tempo",
+          "intent": "charge",
+          "request": {"amount": "500", "currency": "usd"}
+        }]
+      }
+    }
+  }
+}
+~~~
+
+Clients that support payment MUST accept both the error response
+and the tool result forms for `tools/call`, and MUST validate the
+`org.paymentauth/payment-required` object as they would
+`error.data`.
+
+Tool result signaling applies only to `tools/call`. Servers MUST
+use the error response for `resources/read` and `prompts/get`.
 ## Resource Access
 
 Resource reads via `resources/read` MAY require payment:
@@ -611,7 +671,7 @@ Resource reads via `resources/read` MAY require payment:
   "jsonrpc": "2.0",
   "id": 1,
   "error": {
-    "code": -32042,
+    "code": -31042,
     "message": "Payment Required",
     "data": {
       "httpStatus": 402,
@@ -638,7 +698,7 @@ Prompt retrieval via `prompts/get` MAY require payment:
   "jsonrpc": "2.0",
   "id": 1,
   "error": {
-    "code": -32042,
+    "code": -31042,
     "message": "Payment Required",
     "data": {
       "httpStatus": 402,
@@ -658,8 +718,9 @@ Prompt retrieval via `prompts/get` MAY require payment:
 
 ## Error Code Mapping
 
-Servers MUST map payment errors to JSON-RPC error codes within the
-server error range (-32000 to -32099) per {{JSON-RPC}}:
+On generic JSON-RPC transports, servers MUST map payment errors to
+JSON-RPC error codes within the server error range (-32000 to
+-32099) per {{JSON-RPC}}:
 
 | Condition | Code | Description |
 |-----------|------|-------------|
@@ -672,10 +733,41 @@ Note: `-32700` (Parse error) applies only when the entire JSON-RPC
 message is unparseable, not for malformed `_meta` subfields. Use
 `-32602` for credential structure errors.
 
-## Payment Verification Failure
+## MCP Error Codes {#mcp-error-codes}
 
-When payment verification fails, servers MUST return code `-32043`
-with a fresh challenge and failure details:
+MCP assigns its own meanings to codes in the JSON-RPC server
+error range. In {{MCP}}, `-32042` is the URL elicitation required
+error. {{MCP-2026-07-28}} reserves `-32020` to `-32099` for codes
+that MCP defines, and tells receivers not to assume any meaning
+for codes from `-32000` to `-32019`. It directs codes for other
+purposes to be allocated outside `-32768` to `-32000`.
+
+On MCP, servers MUST use the following codes for payment errors
+in place of `-32042` and `-32043`. The data in `error.data` is
+the same as on generic JSON-RPC transports.
+
+| Condition | Code | Description |
+|-----------|------|-------------|
+| Payment required | -31042 | Payment challenge in `error.data` |
+| Payment verification failed | -31043 | Fresh challenge + failure reason |
+| Malformed credential | -32602 | Invalid params (bad JSON structure) |
+| Internal payment error | -32603 | Payment processor failure |
+
+Servers MUST NOT emit `-32042` or `-32043` for payment errors on
+MCP.
+
+Servers that implement an earlier revision of this specification
+emit `-32042` and `-32043` on MCP. Clients MAY accept these codes
+as payment errors from servers using MCP protocol version
+`2025-11-25` or earlier, but only when `error.data` contains a
+`challenges` array. Clients MUST NOT treat a `-32042` response
+that carries `error.data.elicitations` as a payment error.
+
+## Payment Verification Failure {#payment-verification-failure}
+
+When payment verification fails, servers MUST return the Payment
+Verification Failed code (`-32043`, or `-31043` on MCP) with a
+fresh challenge and failure details:
 
 ~~~json
 {
@@ -704,7 +796,8 @@ with a fresh challenge and failure details:
 
 On verification failure, servers MAY return the same challenge if it
 remains valid, or issue a fresh challenge. Clients SHOULD treat any
-`-32043` response as requiring a new payment attempt.
+Payment Verification Failed response as requiring a new payment
+attempt.
 
 The `failure` object MAY contain:
 
@@ -829,6 +922,14 @@ SHOULD:
 - Allow users to configure payment policies per realm
 - Validate that challenge parameters match the requested operation
 
+## Tool Result Signaling
+
+MCP hosts commonly pass tool results, including `content`, to a
+language model. The human-readable text in a payment-required
+tool result is therefore untrusted input. Clients MUST derive
+payment terms only from the validated
+`org.paymentauth/payment-required` object, never from `content`.
+
 ## Denial of Service
 
 Attackers may trigger many payment challenges to exhaust server
@@ -845,13 +946,16 @@ registered per {{I-D.httpauth-payment}}.
 
 Servers MUST use the following JSON-RPC error codes:
 
-| Code | Name | Description |
-|------|------|-------------|
-| -32042 | Payment Required | Server requires payment to proceed |
-| -32043 | Payment Verification Failed | Payment credential invalid |
+| Code | MCP Code | Name | Description |
+|------|----------|------|-------------|
+| -32042 | -31042 | Payment Required | Server requires payment |
+| -32043 | -31043 | Payment Verification Failed | Credential invalid |
 
-These codes are within the JSON-RPC server error range (-32000 to
--32099). Implementations MUST use these exact codes for interoperability.
+The codes in the first column are within the JSON-RPC server
+error range (-32000 to -32099) and apply to generic JSON-RPC
+transports. The MCP codes are outside the JSON-RPC reserved range
+and apply to MCP ({{mcp-error-codes}}). Implementations MUST use
+these exact codes for interoperability.
 
 --- back
 
@@ -994,7 +1098,7 @@ per MCP conventions:
   "jsonrpc": "2.0",
   "id": 1,
   "error": {
-    "code": -32042,
+    "code": -31042,
     "message": "Payment Required",
     "data": {
       "httpStatus": 402,
